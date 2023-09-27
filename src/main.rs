@@ -1,11 +1,14 @@
 use crate::steam::App;
-use anyhow::{Context, Result};
+use anyhow::Context;
 use console::{style, Term};
 use dialoguer::theme::ColorfulTheme;
 use dialoguer::{Input, MultiSelect, Select};
 use futures::future::join_all;
 use rand::seq::IteratorRandom;
 use rand::thread_rng;
+use std::time::Duration;
+use steam::SteamRequestError;
+use tokio::time::sleep;
 
 mod steam;
 
@@ -21,7 +24,7 @@ const TITLE_SPLASH: &str = r"
 ";
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> anyhow::Result<()> {
     println!("{}", style(&TITLE_SPLASH[1..]).cyan().bold());
 
     let term = Term::stdout();
@@ -29,7 +32,7 @@ async fn main() -> Result<()> {
 
     let theme = ColorfulTheme::default();
 
-    let max_price: u16 = Input::with_theme(&theme)
+    let max_price: f32 = Input::with_theme(&theme)
         .with_prompt("Max Price")
         .with_initial_text("0")
         .interact()?;
@@ -50,28 +53,46 @@ async fn main() -> Result<()> {
         .defaults(&[true, false, false])
         .interact()?;
 
+    let mut rng = thread_rng();
     let client = reqwest::Client::new();
     let mut games = Vec::with_capacity(results_count);
+
     while games.len() < results_count {
-        term.write_line(&format!("[{}/{results_count}]", games.len()))?;
-        get_filtered_games(
+        let query = WORDLIST
+            .lines()
+            .choose(&mut rng)
+            .context("Failed to pick random word")?;
+
+        term.write_line(&format!("[{}/{results_count}] • {query}", games.len()))?;
+
+        let res = get_filtered_games(
             &client,
             &mut games,
             max_price,
             max_reviews,
             &required_platforms,
+            query,
         )
-        .await?;
-        term.clear_line()?;
+        .await;
+
+        if matches!(res, Err(SteamRequestError::TooManyRequests)) {
+            println!("Too Many Steam Requests, sleeping for 5 seconds");
+            sleep(Duration::from_secs(5)).await;
+            term.clear_last_lines(1)?;
+        }
+        term.clear_last_lines(1)?;
     }
 
     let titles: Vec<String> = games
         .iter()
         .map(|game| {
+            let price = match &game.data.price_overview {
+                Some(price_overview) => format!("${}", price_overview.final_price as f32 / 100.0),
+                None => "Free".to_string(),
+            };
             format!(
-                "{} • ${} • {} reviews",
+                "{} • {price} • {} reviews",
                 style(game.data.name.clone()).bold(),
-                game.data.price_overview.final_price as f32 / 100.0,
                 game.reviews.num_reviews
             )
         })
@@ -100,17 +121,12 @@ async fn main() -> Result<()> {
 async fn get_filtered_games(
     client: &reqwest::Client,
     list: &mut Vec<App>,
-    max_price: u16,
+    max_price: f32,
     max_reviews: usize,
     required_platforms: &[usize],
-) -> Result<()> {
-    let mut rng = thread_rng();
-    let term = WORDLIST
-        .lines()
-        .choose(&mut rng)
-        .context("Failed to pick random word")?;
-    println!("{term}");
-    let results = steam::search(client, max_price, term.into()).await?;
+    query: &str,
+) -> Result<(), SteamRequestError> {
+    let results = steam::search(client, max_price, query.into()).await?;
 
     let mut requests = Vec::with_capacity(results.len());
     for result in results {
@@ -121,12 +137,19 @@ async fn get_filtered_games(
     let responses = join_all(requests).await;
 
     'response_loop: for response in responses {
-        let Ok(game) = response else {
-            continue;
+        let game = match response {
+            Ok(game) => game,
+            Err(_) => continue,
         };
 
         if game.reviews.total_reviews > max_reviews {
             continue;
+        }
+
+        if let Some(price_overview) = &game.data.price_overview {
+            if price_overview.final_price as f32 > max_price * 100.0 {
+                continue;
+            }
         }
 
         for platform in required_platforms {
@@ -144,6 +167,5 @@ async fn get_filtered_games(
 
         list.push(game);
     }
-
     Ok(())
 }

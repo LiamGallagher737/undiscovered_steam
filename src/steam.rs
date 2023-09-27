@@ -1,23 +1,24 @@
-use anyhow::{anyhow, Context, Result};
+use crate::steam::SteamRequestError::{Other, TooManyRequests};
 use futures::future::join_all;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use thiserror::Error;
 
 pub async fn search(
     client: &reqwest::Client,
-    max_price: u16,
+    max_price: f32,
     term: String,
-) -> Result<Vec<SearchItem>> {
+) -> Result<Vec<SearchItem>, SteamRequestError> {
     let res = client
         .get("https://store.steampowered.com/search/results")
         .query(&[
             ("term", term),
             (
                 "maxprice",
-                if max_price > 0 {
-                    max_price.to_string()
+                if max_price > 0.0 {
+                    (max_price * 100.0).floor().to_string()
                 } else {
                     "free".to_string()
                 },
@@ -27,14 +28,18 @@ pub async fn search(
             ("sort_by", "Released_DESC".into()),
         ])
         .send()
-        .await?
-        .json::<SearchResult>()
         .await?;
 
-    Ok(res.items)
+    if res.status() == StatusCode::TOO_MANY_REQUESTS || res.status() == StatusCode::FORBIDDEN {
+        return Err(TooManyRequests);
+    }
+
+    let data = res.json::<SearchResult>().await?;
+
+    Ok(data.items)
 }
 
-pub async fn app(client: &reqwest::Client, id: String) -> Result<App> {
+pub async fn app(client: &reqwest::Client, id: String) -> Result<App, SteamRequestError> {
     let data_req = client
         .get("https://store.steampowered.com/api/appdetails")
         .query(&[("appids", &id)])
@@ -54,12 +59,12 @@ pub async fn app(client: &reqwest::Client, id: String) -> Result<App> {
         || data_res.status() == StatusCode::FORBIDDEN
         || reviews_res.status() == StatusCode::FORBIDDEN
     {
-        return Err(anyhow!("Too Many Requests"));
+        return Err(TooManyRequests);
     }
 
     let data = {
         let mut res = data_res.json::<HashMap<String, Value>>().await?;
-        let value = res.remove(&id).context("Invalid response")?;
+        let value = res.remove(&id).ok_or(Other)?;
         serde_json::from_value::<AppResult>(value)?.data
     };
 
@@ -69,6 +74,18 @@ pub async fn app(client: &reqwest::Client, id: String) -> Result<App> {
     };
 
     Ok(App { data, reviews })
+}
+
+#[derive(Error, Debug)]
+pub enum SteamRequestError {
+    #[error("Too many requests")]
+    TooManyRequests,
+    #[error("Serde JSON error")]
+    Serde(#[from] serde_json::Error),
+    #[error("Reqwest error")]
+    Reqwest(#[from] reqwest::Error),
+    #[error("Unhandled error")]
+    Other,
 }
 
 // Search Result
@@ -87,6 +104,7 @@ pub struct SearchItem {
 
 // App
 
+#[derive(Debug)]
 pub struct App {
     pub data: AppData,
     pub reviews: AppReviews,
@@ -111,7 +129,7 @@ pub struct AppData {
     pub supported_languages: String,
     pub developers: Vec<String>,
     pub publishers: Vec<String>,
-    pub price_overview: PriceOverview,
+    pub price_overview: Option<PriceOverview>,
     pub platforms: Platforms,
     pub categories: Vec<Category>,
     pub genres: Vec<Genre>,
