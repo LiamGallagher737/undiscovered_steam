@@ -7,7 +7,7 @@ use futures::future::join_all;
 use rand::seq::IteratorRandom;
 use rand::thread_rng;
 use std::time::Duration;
-use steam::SteamRequestError;
+use steam::{SteamRequestError, TAGS};
 use tokio::time::sleep;
 
 mod steam;
@@ -53,6 +53,11 @@ async fn main() -> anyhow::Result<()> {
         .defaults(&[true, false, false])
         .interact()?;
 
+    let required_tags = MultiSelect::with_theme(&theme)
+        .with_prompt("Tags")
+        .items(&TAGS.iter().map(|(_, title)| title).collect::<Vec<_>>())
+        .interact()?;
+
     let mut rng = thread_rng();
     let client = reqwest::Client::new();
     let mut games = Vec::with_capacity(results_count);
@@ -71,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
             max_price,
             max_reviews,
             &required_platforms,
+            &required_tags,
             query,
         )
         .await;
@@ -124,6 +130,7 @@ async fn get_filtered_games(
     max_price: f32,
     max_reviews: usize,
     required_platforms: &[usize],
+    required_tags: &[usize],
     query: &str,
 ) -> Result<(), SteamRequestError> {
     let results = steam::search(client, max_price, query.into()).await?;
@@ -161,6 +168,16 @@ async fn get_filtered_games(
             };
 
             if !supports {
+                continue 'response_loop;
+            }
+        }
+
+        for tag_index in required_tags {
+            let (id, _) = TAGS[*tag_index];
+            if !game.data.categories.iter().any(|cat| cat.id == id) {
+                continue 'response_loop;
+            }
+            if !game.data.genres.iter().any(|gen| gen.id == id.to_string()) {
                 continue 'response_loop;
             }
         }
