@@ -6,6 +6,27 @@ use serde_json::Value;
 use std::collections::HashMap;
 use thiserror::Error;
 
+pub const TAGS: &[(u32, &str)] = &[
+    (9, "Strategy"),
+    (19, "Action"),
+    (21, "Adventure"),
+    (122, "RPG"),
+    (128, "Massively Multiplayer"),
+    (492, "Indie"),
+    (597, "Casual"),
+    (599, "Simulation"),
+    (699, "Racing"),
+    (701, "Sports"),
+    (1625, "Platformer"),
+    (1645, "Tower Defense"),
+    (1662, "Survival"),
+    (1663, "FPS"),
+    (1664, "Puzzle"),
+    (1667, "Horror"),
+    (1685, "Co-op"),
+    (3810, "Sandbox"),
+];
+
 pub async fn search(
     client: &reqwest::Client,
     max_price: f32,
